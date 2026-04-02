@@ -1,0 +1,50 @@
+{
+  "name": "jsondecisions",
+  "version": "0.1.0",
+  "description": "Декларативный движок принятия решений по JSON-фактам",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test",
+    "test:unit": "node --test tests/*.test.js --test-name-pattern=\"^(?!acceptance:)\"",
+    "test:acceptance": "node --test tests/acceptance.test.js",
+    "pack:check": "npm pack --dry-run"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "json",
+    "dsl",
+    "решения",
+    "decision-engine",
+    "orchestrator",
+    "facts",
+    "rules"
+  ],
+  "homepage": "https://github.com/catindev/jsondecisions#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/catindev/jsondecisions.git"
+  },
+  "bugs": {
+    "url": "https://github.com/catindev/jsondecisions/issues"
+  },
+  "author": "catindev",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "src/",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "require": "./index.js",
+      "default": "./index.js"
+    }
+  }
+}
