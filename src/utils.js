@@ -50,12 +50,55 @@ function getPath(flatFacts, path) {
   return { found: false, value: undefined };
 }
 
-function assert(condition, message) {
-  if (!condition) throw new Error(message || 'Assertion failed');
+/**
+ * Detect a flat/nested key collision at the top level of a facts object.
+ *
+ * A collision exists when:
+ *   - there is a top-level key with a dot, e.g. "a.b"
+ *   - AND there is another top-level key that is its first segment, e.g. "a",
+ *     whose value is a non-null plain object
+ *
+ * In that case flattenFacts() would produce a result that depends on the
+ * iteration order of Object.keys(), which is insertion-order in V8.
+ * The same logical facts with keys in different order would yield different
+ * flat maps, and therefore potentially different decisions.
+ *
+ * Returns the first conflicting dotted key found, or null if no conflict.
+ */
+function detectFlatNestedConflict(obj) {
+  if (obj === null || typeof obj !== 'object' || Array.isArray(obj)) return null;
+
+  const keys = Object.keys(obj);
+  const dottedKeys = keys.filter(k => k.includes('.'));
+  if (dottedKeys.length === 0) return null;
+
+  const objectPrefixes = new Set(
+    keys.filter(k =>
+      !k.includes('.') &&
+      obj[k] !== null &&
+      typeof obj[k] === 'object' &&
+      !Array.isArray(obj[k])
+    )
+  );
+
+  for (const flat of dottedKeys) {
+    const prefix = flat.split('.')[0];
+    if (objectPrefixes.has(prefix)) return flat;
+  }
+  return null;
 }
 
+/**
+ * Returns true only for plain objects — i.e. objects whose prototype is
+ * Object.prototype or null (Object.create(null)).
+ *
+ * Rejects: Date, Map, Set, RegExp, Array, class instances, and any other
+ * object with a non-standard prototype chain.
+ */
 function isPlainObject(val) {
-  return val !== null && typeof val === 'object' && !Array.isArray(val);
+  if (val === null || typeof val !== 'object' || Array.isArray(val)) return false;
+  const proto = Object.getPrototypeOf(val);
+  return proto === Object.prototype || proto === null;
 }
 
 function deepCloneValue(val) {
@@ -102,7 +145,7 @@ function createReadOnlyMap(map) {
 module.exports = {
   flattenFacts,
   getPath,
-  assert,
+  detectFlatNestedConflict,
   isPlainObject,
   deepCloneValue,
   deepFreezeValue,

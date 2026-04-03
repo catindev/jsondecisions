@@ -85,7 +85,6 @@ const artifacts = [
       "out_of_stock_notify",
       "paid_and_available_confirm",
     ],
-    entrypoint: true,
   },
 
   {
@@ -194,17 +193,57 @@ interface DecisionEngine {
   run(
     compiled: CompiledDecisions,
     entrypointId: string,
-    facts: unknown,
+    facts: Record<string, unknown> | null | undefined,
     options?: RunOptions,
   ): DecisionResult;
 }
 ```
+
+### Контракт `facts`
+
+`facts` должен быть **plain object** - объектом с прототипом `Object.prototype`
+или `null` (т.е. `{}` или `Object.create(null)`).
+
+`null` и `undefined` принимаются и нормализуются в `{}`.
+
+Следующие значения возвращают `ABORT INVALID_FACTS_TYPE`:
+массивы, строки, числа, `Date`, `Map`, `Set`, `RegExp`, экземпляры классов.
+
+Если объект содержит одновременно top-level dotted key (`"a.b"`) и вложенный объект
+с тем же первым сегментом (`a: { b: ... }`) — `ABORT CONFLICTING_FACT_PATHS`.
+Такая комбинация делает результат нормализации зависящим от порядка ключей объекта.
 
 Экспортируется через:
 
 ```js
 const { createEngine, CompilationError } = require("jsondecisions");
 ```
+
+## Предупреждения компилятора
+
+`compile()` помимо `decisionSets` и `registry` возвращает поле `warnings`
+с массивом `CompilationWarningEntry[]`. Предупреждения никогда не бросают исключение:
+они сигнализируют о вероятных ошибках в матрице правил, которые не являются
+структурными нарушениями, но почти наверняка являются ошибками автора.
+
+```js
+const compiled = engine.compile(artifacts);
+
+if (compiled.warnings.length > 0) {
+  for (const w of compiled.warnings) {
+    console.warn(`[${w.code}] ${w.artifactId} (${w.path}): ${w.message}`);
+  }
+}
+```
+
+| Код предупреждения                      | Смысл                                                                                                                      |
+| --------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `UNREACHABLE_RULE`                      | Правило никогда не сработает: более ранее правило субсумирует его условия                                                  |
+| `PATCH_PLAN_FROM_NOT_IN_REQUIRED_FACTS` | `patchPlanFrom` ссылается на путь, не объявленный в `requiredFacts` — при отсутствии факта `patchPlan` молча станет `null` |
+| `UNUSED_REQUIRED_FACT`                  | Путь объявлен в `requiredFacts`, но ни одно правило не использует его в `when`                                             |
+
+В CI-сборках рекомендуется завершать процесс с ненулевым кодом при наличии
+предупреждений — это обязанность CLI (`jsondecisions-cli`), а не библиотеки.
 
 ## Structured diagnostics
 

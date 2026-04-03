@@ -227,7 +227,6 @@
 | `strict`            | boolean  | нет          | `false`   | Строгий режим: `DEFAULTED` трактуется как `ABORT`. См. раздел 5.3.              |
 | `defaultDecision`   | object   | да           | —         | Возвращается, если ни одно правило не сработало. Требует `decision` и `reason`. |
 | `rules`             | string[] | да           | —         | Упорядоченный список ссылок на `decision-rule`. Разрешаются по разделу 3.       |
-| `entrypoint`        | boolean  | нет          | `false`   | Если `true` — набор указывается в build-info как вызываемая точка входа.        |
 
 **Правила проверяются в том порядке, в котором они перечислены в `rules`.** Первое сработавшее правило завершает вычисление. Последующие правила не проверяются.
 
@@ -258,8 +257,7 @@
     "decision": "REJECT_TECH",
     "reason": "NO_RULE_MATCHED"
   },
-  "rules": ["not_found", "full_match", "library.common.reject_compliance"],
-  "entrypoint": true
+  "rules": ["not_found", "full_match", "library.common.reject_compliance"]
 }
 ```
 
@@ -348,6 +346,8 @@ run() →
 - `patchPlanFrom`, если указан, должен быть непустой строкой.
 - `requiredFacts`, если указан, должен быть массивом непустых строк.
 - `strict`, если указан, должен быть булевым значением.
+- Каждый ключ в `when` должен быть корректным путём в точечной нотации: непустая строка без пустых сегментов. Примеры некорректных путей: `""`, `"."`, `"a."`, `".b"`, `"a..b"`. Ошибка: `INVALID_WHEN_PATH`.
+- Каждый элемент `requiredFacts` должен быть корректным путём в точечной нотации по тому же правилу. Ошибка: `INVALID_REQUIRED_FACT_PATH`.
 
 ### Фаза 3: validateCodeUniqueness
 
@@ -370,27 +370,39 @@ run() →
 - Собрать множество фактических путей, используемых в `when` всех правил набора.
 - Заморозить скомпилированную структуру.
 
-### Фаза 6: lintDecisionSets (опциональная)
+### Фаза 6: analyzeDecisionSets
 
-Запускается командой `jsondecisions lint` (не выполняется при `build` и `validate`).
+Статический анализ скомпилированных decision-set. Выполняется всегда — не только
+при явном вызове lint. Никогда не бросает `CompilationError`. Результаты помещаются
+в `CompiledDecisions.warnings: readonly CompilationWarningEntry[]`.
 
-Обнаруживает:
+**`UNREACHABLE_RULE`**
 
-- **Перекрытые правила (shadowed)**: правило, которое никогда не сработает, потому что
-  ему предшествует более общее правило. Два правила с идентичными `when` значит второе
-  будет всегда перекрыто.
-- **Недостижимые правила (unreachable)**: правило, следующее после правила с пустым
-  `when` (совпадает с любыми фактами).
-- **Перекрытие подмножеством (subset shadow)**: если `when` правила A является строгим
-  подмножеством `when` правила B, и A предшествует B, то B никогда не сработает для
-  случаев, когда A совпадает.
-- **Несогласованность `requiredFacts` с реально используемыми путями:**
-  - Путь используется в условиях `when` правил, но не объявлен в `requiredFacts` →
-    предупреждение `FACT_USED_BUT_NOT_REQUIRED`.
-  - Путь объявлен в `requiredFacts`, но не используется ни в одном условии `when` →
-    предупреждение `REQUIRED_FACT_NEVER_USED`.
+Правило B на позиции j недостижимо, если существует правило A на позиции i < j,
+все условия которого являются подмножеством условий B (по паре `path + expected`).
+При семантике `first_match_wins` A срабатывает раньше для любого входа, который
+совпал бы с B. Предупреждение содержит идентификаторы обоих правил и их позиции.
 
-Lint формирует предупреждения, не ошибки. Компиляция при этом завершается успешно.
+Частный случай — правило с пустым `when: {}`. Пустое множество условий вакуумно
+удовлетворяет проверке подмножества: такое правило совпадает с любыми фактами и
+субсумирует все правила, следующие за ним. Компилятор выдаёт `UNREACHABLE_RULE`
+для каждого правила после пустого `when: {}`.
+
+Пустой `when: {}` в конце списка правил легитимен — он выступает как явный "catch-all"
+и ничего не субсумирует.
+
+**`PATCH_PLAN_FROM_NOT_IN_REQUIRED_FACTS`**
+
+Правило использует `patchPlanFrom`, указывающий на путь, не объявленный в
+`requiredFacts` соответствующего decision-set. Если этот путь отсутствует в
+`facts` при вызове `run()`, движок молча вернёт `patchPlan: null`.
+Предупреждение помогает обнаружить потенциально неочевидное молчаливое поведение.
+
+**`UNUSED_REQUIRED_FACT`**
+
+Путь объявлен в `requiredFacts`, но не встречается ни в одном условии `when`
+ни одного правила данного decision-set. Объявление либо устарело (мёртвый контракт),
+либо указывает на забытое условие в одном из правил.
 
 ---
 
@@ -416,37 +428,53 @@ run(compiled, entrypointId, facts, options?)
 ### Алгоритм выполнения
 
 ```
-1. Нормализовать facts → плоский словарь
+0а. Валидация типа facts:
+    Допустимые значения: plain object, null, undefined.
+    Plain object — объект с прототипом Object.prototype или null
+    (т.е. {} или Object.create(null)). Не являются plain object:
+    Date, Map, Set, RegExp, экземпляры классов, массивы, строки, числа.
+    null и undefined нормализуются в {} (пустой набор фактов).
+    Всё остальное → ABORT (INVALID_FACTS_TYPE).
 
-2. Найти decision-set по entrypointId (проверить наличие и тип)
+0б. Поиск decision-set по entrypointId:
+    Если не найден → вернуть ABORT (UNKNOWN_ENTRYPOINT)
 
-3. [Уровень 1] Upfront-проверка requiredFacts:
-   Для каждого пути из decision-set.requiredFacts:
-     Если путь отсутствует в плоском словаре facts →
-       вернуть ABORT (REQUIRED_FACT_MISSING, fact: <путь>)
-   Эта проверка выполняется до вычисления первого правила.
-   Не зависит от missingFactPolicy.
+0в. Обнаружение коллизии flat/nested ключей:
+    Если facts содержит одновременно top-level dotted key (напр. "a.b")
+    и top-level объект с тем же первым сегментом (напр. a: { b: ... }) →
+      вернуть ABORT (CONFLICTING_FACT_PATHS, fact: <конфликтующий ключ>)
+    Такая комбинация делает результат flattenFacts() зависящим от порядка
+    ключей объекта, что недопустимо для детерминированного движка решений.
 
-4. Для каждой ссылки на правило в compiledDecisionSet.rules (по порядку):
-     а. Найти decision-rule по разрешённому идентификатору
-     б. [Уровень 2] Для каждого условия when:
-          Вычислить значение по пути в плоском словаре facts
-          Если путь отсутствует → применить missingFactPolicy:
-            "false" → условие = false (lazy, правило не срабатывает)
-            "error" → вернуть ABORT (MISSING_FACT, fact: <путь>)
-     в. Собрать результат → { matched: bool, failedConditions: [] }
-     г. Добавить запись в trace: { ruleId, matched, failedConditions? }
-     д. Если matched:
-          - Разрешить patchPlan: если задан then.patchPlanFrom,
-            прочитать facts[patchPlanFrom] → patchPlan (null если путь отсутствует;
-            patchPlanFrom никогда не вызывает missingFactPolicy: "error")
-          - Вернуть результат MATCHED (см. раздел 8)
+1.  Нормализовать facts → плоский словарь
 
-5. Ни одно правило не сработало:
-   Если decision-set.strict = true →
-     вернуть ABORT (DEFAULT_REACHED_IN_STRICT_MODE, с traceBeforeDefault)
-   Иначе →
-     вернуть результат DEFAULTED, используя defaultDecision
+2.  [Уровень 1] Upfront-проверка requiredFacts:
+    Для каждого пути из decision-set.requiredFacts:
+      Если путь отсутствует в плоском словаре facts →
+        вернуть ABORT (REQUIRED_FACT_MISSING, fact: <путь>)
+    Эта проверка выполняется до вычисления первого правила.
+    Не зависит от missingFactPolicy.
+
+3.  Для каждой ссылки на правило в compiledDecisionSet.rules (по порядку):
+      а. Найти decision-rule по разрешённому идентификатору
+      б. [Уровень 2] Для каждого условия when:
+           Вычислить значение по пути в плоском словаре facts
+           Если путь отсутствует → применить missingFactPolicy:
+             "false" → условие = false (lazy, правило не срабатывает)
+             "error" → вернуть ABORT (MISSING_FACT, fact: <путь>)
+      в. Собрать результат → { matched: bool, failedConditions: [] }
+      г. Добавить запись в trace: { ruleId, matched, failedConditions? }
+      д. Если matched:
+           - Разрешить patchPlan: если задан then.patchPlanFrom,
+             прочитать facts[patchPlanFrom] → patchPlan (null если путь отсутствует;
+             patchPlanFrom никогда не вызывает missingFactPolicy: "error")
+           - Вернуть результат MATCHED (см. раздел 8)
+
+4.  Ни одно правило не сработало:
+    Если decision-set.strict = true →
+      вернуть ABORT (DEFAULT_REACHED_IN_STRICT_MODE, с traceBeforeDefault)
+    Иначе →
+      вернуть результат DEFAULTED, используя defaultDecision
 ```
 
 ### Вычисление `when`
@@ -500,15 +528,25 @@ run(compiled, entrypointId, facts, options?)
 **отсутствует** и не передаётся как `null`, а именно отсутствует в объекте ответа.
 Оркестратор не должен опираться на `error: null` как на признак успешного исхода.
 
-**Коды `error.code`:**
+**Коды `error.code` рантайма:**
 
 | Код                              | Триггер                                                                   |
 | -------------------------------- | ------------------------------------------------------------------------- |
+| `INVALID_FACTS_TYPE`             | `facts` не plain object: Date, Map, RegExp, класс-инстанс, массив, примитив  |
+| `CONFLICTING_FACT_PATHS`         | `facts` содержит и dotted key `"a.b"`, и объект `a` — порядок-зависимость |
 | `REQUIRED_FACT_MISSING`          | Путь из `requiredFacts` отсутствует в `facts` (upfront, ур. 1)            |
 | `MISSING_FACT`                   | Путь из `when` отсутствует при `missingFactPolicy: "error"` (lazy, ур. 2) |
 | `DEFAULT_REACHED_IN_STRICT_MODE` | Ни одно правило не сработало при `strict: true`                           |
 | `UNKNOWN_ENTRYPOINT`             | `entrypointId` не найден в скомпилированных артефактах                    |
 | `RUNTIME_EXCEPTION`              | Непредвиденное исключение в рантайме                                      |
+
+**Коды compile-time предупреждений (`CompilationWarningEntry.code`):**
+
+| Код                                      | Триггер                                                                        |
+| ---------------------------------------- | ------------------------------------------------------------------------------ |
+| `UNREACHABLE_RULE`                       | Правило субсумировано более ранним правилом и никогда не сработает             |
+| `PATCH_PLAN_FROM_NOT_IN_REQUIRED_FACTS`  | `patchPlanFrom` ссылается на путь, не объявленный в `requiredFacts`            |
+| `UNUSED_REQUIRED_FACT`                   | Путь объявлен в `requiredFacts`, но не используется ни в одном условии `when`  |
 
 ---
 

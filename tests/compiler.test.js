@@ -187,3 +187,347 @@ test('compile error: entries are structured for CLI consumption', () => {
   assert.equal(entry.artifactId, 'entrypoints.test.routing');
   assert.equal(entry.path, 'rules[1]');
 });
+
+// ─── compile: warnings infrastructure ────────────────────────────────────────
+
+test('compile: warnings is a frozen array on clean artifacts', () => {
+  const compiled = engine.compile([RULE_NOT_FOUND, RULE_FOUND, DECISION_SET]);
+  assert.ok(Array.isArray(compiled.warnings), 'warnings must be an array');
+  assert.ok(Object.isFrozen(compiled.warnings), 'warnings must be frozen');
+});
+
+test('compile: clean artifacts produce no warnings', () => {
+  const compiled = engine.compile([RULE_NOT_FOUND, RULE_FOUND, DECISION_SET]);
+  assert.equal(compiled.warnings.length, 0);
+});
+
+// ─── compile error: INVALID_WHEN_PATH ────────────────────────────────────────
+
+test('compile error: empty string when path', () => {
+  const err = compileExpectError([
+    {
+      id: 'x.r', type: 'decision-rule', description: 'd',
+      when: { '': 'val' },
+      then: { decision: 'A', reason: 'B' },
+    },
+    { id: 'x', type: 'decision-set', description: 'd', version: '1', mode: 'first_match_wins',
+      defaultDecision: { decision: 'A', reason: 'B' }, rules: ['r'] },
+  ]);
+  assert.ok(hasError(err, 'INVALID_WHEN_PATH'), 'empty string path must fail');
+});
+
+test('compile error: dot-only when path "."', () => {
+  const err = compileExpectError([
+    {
+      id: 'x.r', type: 'decision-rule', description: 'd',
+      when: { '.': 'val' },
+      then: { decision: 'A', reason: 'B' },
+    },
+    { id: 'x', type: 'decision-set', description: 'd', version: '1', mode: 'first_match_wins',
+      defaultDecision: { decision: 'A', reason: 'B' }, rules: ['r'] },
+  ]);
+  assert.ok(hasError(err, 'INVALID_WHEN_PATH'), 'dot-only path must fail');
+});
+
+test('compile error: double-dot when path "a..b"', () => {
+  const err = compileExpectError([
+    {
+      id: 'x.r', type: 'decision-rule', description: 'd',
+      when: { 'a..b': 'val' },
+      then: { decision: 'A', reason: 'B' },
+    },
+    { id: 'x', type: 'decision-set', description: 'd', version: '1', mode: 'first_match_wins',
+      defaultDecision: { decision: 'A', reason: 'B' }, rules: ['r'] },
+  ]);
+  assert.ok(hasError(err, 'INVALID_WHEN_PATH'), 'double-dot path must fail');
+});
+
+test('compile error: trailing dot when path "a."', () => {
+  const err = compileExpectError([
+    {
+      id: 'x.r', type: 'decision-rule', description: 'd',
+      when: { 'a.': 'val' },
+      then: { decision: 'A', reason: 'B' },
+    },
+    { id: 'x', type: 'decision-set', description: 'd', version: '1', mode: 'first_match_wins',
+      defaultDecision: { decision: 'A', reason: 'B' }, rules: ['r'] },
+  ]);
+  assert.ok(hasError(err, 'INVALID_WHEN_PATH'), 'trailing dot path must fail');
+});
+
+test('compile: valid when paths accepted', () => {
+  // single segment, two segments, numeric segment
+  const rule = {
+    id: 'x.r', type: 'decision-rule', description: 'd',
+    when: { 'status': 'A', 'payment.status': 'B', 'items.0': 'C' },
+    then: { decision: 'A', reason: 'B' },
+  };
+  const ds = { id: 'x', type: 'decision-set', description: 'd', version: '1',
+    mode: 'first_match_wins', defaultDecision: { decision: 'A', reason: 'B' }, rules: ['r'] };
+  assert.doesNotThrow(() => engine.compile([rule, ds]));
+});
+
+// ─── compile error: INVALID_REQUIRED_FACT_PATH ───────────────────────────────
+
+test('compile error: requiredFacts path with empty segment', () => {
+  const err = compileExpectError([
+    RULE_NOT_FOUND, RULE_FOUND,
+    { ...DECISION_SET, requiredFacts: ['abs.findResult', 'bad..path'] },
+  ]);
+  assert.ok(hasError(err, 'INVALID_REQUIRED_FACT_PATH'), 'double-dot in requiredFacts must fail');
+});
+
+// ─── compile warning: UNREACHABLE_RULE ───────────────────────────────────────
+
+test('compile warning: UNREACHABLE_RULE when earlier rule subsumes later rule', () => {
+  // R1: { status: "PAID" }  — general rule
+  // R2: { status: "PAID", country: "RU" }  — unreachable: R1 fires first for any input matching R2
+  const r1 = {
+    id: 'ds.r1', type: 'decision-rule', description: 'r1',
+    when: { 'status': 'PAID' },
+    then: { decision: 'APPROVE', reason: 'PAID' },
+  };
+  const r2 = {
+    id: 'ds.r2', type: 'decision-rule', description: 'r2',
+    when: { 'status': 'PAID', 'country': 'RU' },
+    then: { decision: 'APPROVE_RESTRICTED', reason: 'PAID_RU' },
+  };
+  const ds = {
+    id: 'ds', type: 'decision-set', description: 'd', version: '1',
+    mode: 'first_match_wins',
+    defaultDecision: { decision: 'X', reason: 'Y' },
+    rules: ['r1', 'r2'],
+  };
+  const compiled = engine.compile([r1, r2, ds]);
+  const w = compiled.warnings.find(w => w.code === 'UNREACHABLE_RULE');
+  assert.ok(w, 'expected UNREACHABLE_RULE warning');
+  assert.ok(w.message.includes('ds.r2'), 'message should name the unreachable rule');
+  assert.ok(w.message.includes('ds.r1'), 'message should name the subsuming rule');
+});
+
+test('compile warning: no UNREACHABLE_RULE for mutually exclusive rules', () => {
+  const r1 = {
+    id: 'ds.r1', type: 'decision-rule', description: 'r1',
+    when: { 'status': 'PENDING' },
+    then: { decision: 'WAIT', reason: 'PENDING' },
+  };
+  const r2 = {
+    id: 'ds.r2', type: 'decision-rule', description: 'r2',
+    when: { 'status': 'PAID' },
+    then: { decision: 'APPROVE', reason: 'PAID' },
+  };
+  const ds = {
+    id: 'ds', type: 'decision-set', description: 'd', version: '1',
+    mode: 'first_match_wins',
+    defaultDecision: { decision: 'X', reason: 'Y' },
+    rules: ['r1', 'r2'],
+  };
+  const compiled = engine.compile([r1, r2, ds]);
+  assert.equal(compiled.warnings.filter(w => w.code === 'UNREACHABLE_RULE').length, 0);
+});
+
+test('compile warning: no UNREACHABLE_RULE when later rule is more specific but earlier is not a superset', () => {
+  // R1: { a: 1, b: 2 }  R2: { a: 1, c: 3 }  — R1 is NOT a subset of R2 (b vs c)
+  const r1 = {
+    id: 'ds.r1', type: 'decision-rule', description: 'r1',
+    when: { 'a': 1, 'b': 2 },
+    then: { decision: 'X', reason: 'X' },
+  };
+  const r2 = {
+    id: 'ds.r2', type: 'decision-rule', description: 'r2',
+    when: { 'a': 1, 'c': 3 },
+    then: { decision: 'Y', reason: 'Y' },
+  };
+  const ds = {
+    id: 'ds', type: 'decision-set', description: 'd', version: '1',
+    mode: 'first_match_wins',
+    defaultDecision: { decision: 'X', reason: 'Y' },
+    rules: ['r1', 'r2'],
+  };
+  const compiled = engine.compile([r1, r2, ds]);
+  assert.equal(compiled.warnings.filter(w => w.code === 'UNREACHABLE_RULE').length, 0);
+});
+
+test('compile warning: UNREACHABLE_RULE — identical rules', () => {
+  const r1 = {
+    id: 'ds.r1', type: 'decision-rule', description: 'r1',
+    when: { 'x': 'A' },
+    then: { decision: 'X', reason: 'X' },
+  };
+  const r2 = {
+    id: 'ds.r2', type: 'decision-rule', description: 'r2',
+    when: { 'x': 'A' },
+    then: { decision: 'Y', reason: 'Y' },
+  };
+  const ds = {
+    id: 'ds', type: 'decision-set', description: 'd', version: '1',
+    mode: 'first_match_wins',
+    defaultDecision: { decision: 'X', reason: 'Y' },
+    rules: ['r1', 'r2'],
+  };
+  const compiled = engine.compile([r1, r2, ds]);
+  assert.ok(compiled.warnings.some(w => w.code === 'UNREACHABLE_RULE'));
+});
+
+// ─── compile warning: PATCH_PLAN_FROM_NOT_IN_REQUIRED_FACTS ──────────────────
+
+test('compile warning: PATCH_PLAN_FROM_NOT_IN_REQUIRED_FACTS when path not declared', () => {
+  const rule = {
+    id: 'ds.r1', type: 'decision-rule', description: 'r1',
+    when: { 'status': 'PAID' },
+    then: { decision: 'ENRICH', reason: 'PAID', patchPlanFrom: 'diff.fillableFields' },
+  };
+  const ds = {
+    id: 'ds', type: 'decision-set', description: 'd', version: '1',
+    mode: 'first_match_wins',
+    requiredFacts: ['status'],   // diff.fillableFields NOT declared
+    defaultDecision: { decision: 'X', reason: 'Y' },
+    rules: ['r1'],
+  };
+  const compiled = engine.compile([rule, ds]);
+  const w = compiled.warnings.find(w => w.code === 'PATCH_PLAN_FROM_NOT_IN_REQUIRED_FACTS');
+  assert.ok(w, 'expected PATCH_PLAN_FROM_NOT_IN_REQUIRED_FACTS warning');
+  assert.ok(w.message.includes('diff.fillableFields'));
+});
+
+test('compile warning: no PATCH_PLAN_FROM_NOT_IN_REQUIRED_FACTS when path is declared', () => {
+  const rule = {
+    id: 'ds.r1', type: 'decision-rule', description: 'r1',
+    when: { 'status': 'PAID' },
+    then: { decision: 'ENRICH', reason: 'PAID', patchPlanFrom: 'diff.fillableFields' },
+  };
+  const ds = {
+    id: 'ds', type: 'decision-set', description: 'd', version: '1',
+    mode: 'first_match_wins',
+    requiredFacts: ['status', 'diff.fillableFields'],  // declared ✓
+    defaultDecision: { decision: 'X', reason: 'Y' },
+    rules: ['r1'],
+  };
+  const compiled = engine.compile([rule, ds]);
+  assert.equal(
+    compiled.warnings.filter(w => w.code === 'PATCH_PLAN_FROM_NOT_IN_REQUIRED_FACTS').length, 0
+  );
+});
+
+test('compile warning: no PATCH_PLAN_FROM_NOT_IN_REQUIRED_FACTS when requiredFacts is empty and no patchPlanFrom', () => {
+  const compiled = engine.compile([RULE_NOT_FOUND, RULE_FOUND, DECISION_SET]);
+  assert.equal(
+    compiled.warnings.filter(w => w.code === 'PATCH_PLAN_FROM_NOT_IN_REQUIRED_FACTS').length, 0
+  );
+});
+
+// ─── compile warning: UNUSED_REQUIRED_FACT ───────────────────────────────────
+
+test('compile warning: UNUSED_REQUIRED_FACT when declared path never used in when', () => {
+  const rule = {
+    id: 'ds.r1', type: 'decision-rule', description: 'r1',
+    when: { 'status': 'PAID' },
+    then: { decision: 'GO', reason: 'PAID' },
+  };
+  const ds = {
+    id: 'ds', type: 'decision-set', description: 'd', version: '1',
+    mode: 'first_match_wins',
+    requiredFacts: ['status', 'extra.unused'],  // extra.unused never in any when
+    defaultDecision: { decision: 'X', reason: 'Y' },
+    rules: ['r1'],
+  };
+  const compiled = engine.compile([rule, ds]);
+  const w = compiled.warnings.find(w => w.code === 'UNUSED_REQUIRED_FACT');
+  assert.ok(w, 'expected UNUSED_REQUIRED_FACT warning');
+  assert.ok(w.message.includes('extra.unused'));
+});
+
+test('compile warning: no UNUSED_REQUIRED_FACT when all required facts are used in when', () => {
+  const rule = {
+    id: 'ds.r1', type: 'decision-rule', description: 'r1',
+    when: { 'status': 'PAID', 'country': 'RU' },
+    then: { decision: 'GO', reason: 'PAID' },
+  };
+  const ds = {
+    id: 'ds', type: 'decision-set', description: 'd', version: '1',
+    mode: 'first_match_wins',
+    requiredFacts: ['status', 'country'],
+    defaultDecision: { decision: 'X', reason: 'Y' },
+    rules: ['r1'],
+  };
+  const compiled = engine.compile([rule, ds]);
+  assert.equal(compiled.warnings.filter(w => w.code === 'UNUSED_REQUIRED_FACT').length, 0);
+});
+
+test('compile warning: warning entry has expected fields', () => {
+  const r1 = {
+    id: 'ds.r1', type: 'decision-rule', description: 'r1',
+    when: { 'x': 'A' },
+    then: { decision: 'X', reason: 'X' },
+  };
+  const r2 = {
+    id: 'ds.r2', type: 'decision-rule', description: 'r2',
+    when: { 'x': 'A', 'y': 'B' },
+    then: { decision: 'Y', reason: 'Y' },
+  };
+  const ds = {
+    id: 'ds', type: 'decision-set', description: 'd', version: '1',
+    mode: 'first_match_wins',
+    defaultDecision: { decision: 'X', reason: 'Y' },
+    rules: ['r1', 'r2'],
+  };
+  const compiled = engine.compile([r1, r2, ds]);
+  const w = compiled.warnings.find(w => w.code === 'UNREACHABLE_RULE');
+  assert.ok(w);
+  assert.deepEqual(Object.keys(w).sort(), ['artifactId', 'code', 'message', 'path']);
+  assert.equal(typeof w.code, 'string');
+  assert.equal(typeof w.message, 'string');
+});
+
+// ─── compile warning: UNREACHABLE_RULE — empty when subsumes all following ───
+
+test('compile warning: UNREACHABLE_RULE — empty when:{} subsumes all following rules', () => {
+  const r1 = {
+    id: 'ds.r1', type: 'decision-rule', description: 'r1',
+    when: {},                        // matches anything — universal rule
+    then: { decision: 'CATCH_ALL', reason: 'ALWAYS' },
+  };
+  const r2 = {
+    id: 'ds.r2', type: 'decision-rule', description: 'r2',
+    when: { status: 'PAID' },        // unreachable: r1 always fires first
+    then: { decision: 'PAID', reason: 'PAID' },
+  };
+  const r3 = {
+    id: 'ds.r3', type: 'decision-rule', description: 'r3',
+    when: { status: 'FAILED', country: 'RU' },
+    then: { decision: 'FAIL', reason: 'FAIL' },
+  };
+  const ds = {
+    id: 'ds', type: 'decision-set', description: 'd', version: '1',
+    mode: 'first_match_wins',
+    defaultDecision: { decision: 'X', reason: 'Y' },
+    rules: ['r1', 'r2', 'r3'],
+  };
+  const compiled = engine.compile([r1, r2, r3, ds]);
+  const unreachable = compiled.warnings.filter(w => w.code === 'UNREACHABLE_RULE');
+  assert.equal(unreachable.length, 2, 'both r2 and r3 must be flagged unreachable');
+  assert.ok(unreachable.some(w => w.message.includes('ds.r2')));
+  assert.ok(unreachable.some(w => w.message.includes('ds.r3')));
+});
+
+test('compile warning: no UNREACHABLE_RULE when empty when is last', () => {
+  // empty when at the END is a legitimate "catch-all default via rule"
+  const r1 = {
+    id: 'ds.r1', type: 'decision-rule', description: 'r1',
+    when: { status: 'PAID' },
+    then: { decision: 'PAID', reason: 'PAID' },
+  };
+  const r2 = {
+    id: 'ds.r2', type: 'decision-rule', description: 'r2',
+    when: {},    // catch-all at end — only reached when r1 doesn't match
+    then: { decision: 'CATCH_ALL', reason: 'ALWAYS' },
+  };
+  const ds = {
+    id: 'ds', type: 'decision-set', description: 'd', version: '1',
+    mode: 'first_match_wins',
+    defaultDecision: { decision: 'X', reason: 'Y' },
+    rules: ['r1', 'r2'],
+  };
+  const compiled = engine.compile([r1, r2, ds]);
+  assert.equal(compiled.warnings.filter(w => w.code === 'UNREACHABLE_RULE').length, 0);
+});

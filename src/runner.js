@@ -1,20 +1,25 @@
 'use strict';
 
-const { flattenFacts, getPath, deepCloneValue } = require('./utils');
+const { flattenFacts, getPath, detectFlatNestedConflict, isPlainObject, deepCloneValue } = require('./utils');
 
 /**
  * run(compiled, entrypointId, facts, options?)
  *
  * Implements the normative algorithm from spec section 7.
  * Steps:
- *   1. Flatten facts to dot-notation map
- *   2. Find decision-set
- *   3. [Level 1] Upfront requiredFacts check — before any rule evaluation
- *   4. For each rule: [Level 2] lazy missingFactPolicy per condition
- *   5. If matched: resolve patchPlan (silent, never ABORT)
- *   6. No match: strict → ABORT, else DEFAULTED
+ *   0a. Validate facts type — must be a plain object or null/undefined
+ *   0b. Detect flat/nested key collision in facts
+ *   1.  Flatten facts to dot-notation map
+ *   2.  Find decision-set
+ *   3.  [Level 1] Upfront requiredFacts check — before any rule evaluation
+ *   4.  For each rule: [Level 2] lazy missingFactPolicy per condition
+ *   5.  If matched: resolve patchPlan (silent, never ABORT)
+ *   6.  No match: strict → ABORT, else DEFAULTED
  *
  * Key invariants (see spec):
+ * - null/undefined facts is treated as {} (empty facts)
+ * - arrays, primitives as facts → ABORT (INVALID_FACTS_TYPE)
+ * - flat dotted key + nested object at same prefix → ABORT (CONFLICTING_FACT_PATHS)
  * - null is a valid fact value, NOT equivalent to a missing path
  * - patchPlanFrom NEVER triggers missingFactPolicy — absence gives patchPlan: null
  * - error field is ABSENT (not null) on MATCHED/DEFAULTED responses
@@ -23,15 +28,25 @@ const { flattenFacts, getPath, deepCloneValue } = require('./utils');
  */
 function run(compiled, entrypointId, facts, options) {
   const traceEnabled = !options || options.trace !== false;
-  const trace = [];
+  const trace = traceEnabled ? [] : null;
 
-  // Step 1: Normalize facts
-  const flatFacts = flattenFacts(facts || {});
+  // Step 0a: Validate facts type.
+  // null and undefined are accepted and normalised to {}.
+  // Arrays and primitives are rejected — they are almost certainly integration mistakes
+  // and would silently produce an empty fact-set, masking the error.
+  const normalizedFacts = facts == null ? {} : facts;
+  if (!isPlainObject(normalizedFacts)) {
+    return makeAbort(null, [], {
+      code: 'INVALID_FACTS_TYPE',
+      message: 'facts must be a plain object (got: ' +
+        (Array.isArray(normalizedFacts) ? 'array' : typeof normalizedFacts) + ')',
+    });
+  }
 
-  // Step 2: Find decision-set
+  // Step 2: Find decision-set (done before conflict check so ABORT carries version).
   const decisionSet = compiled.decisionSets.get(entrypointId);
   if (!decisionSet) {
-    return makeAbort(null, trace, {
+    return makeAbort(null, trace ?? [], {
       code: 'UNKNOWN_ENTRYPOINT',
       message: 'Decision set not found: ' + entrypointId,
       entrypointId,
@@ -40,12 +55,30 @@ function run(compiled, entrypointId, facts, options) {
 
   const version = decisionSet.version;
 
+  // Step 0b: Detect flat/nested key collision.
+  // If facts contains both e.g. "a.b" (top-level dotted key) and "a" (object),
+  // flattenFacts() would produce an order-dependent result. Fail fast instead.
+  const conflictKey = detectFlatNestedConflict(normalizedFacts);
+  if (conflictKey) {
+    const prefix = conflictKey.split('.')[0];
+    return makeAbort(version, trace ?? [], {
+      code: 'CONFLICTING_FACT_PATHS',
+      message: 'facts contains both flat dotted key "' + conflictKey +
+        '" and nested object at "' + prefix +
+        '" — result would be order-dependent',
+      fact: conflictKey,
+    });
+  }
+
+  // Step 1: Normalize facts.
+  const flatFacts = flattenFacts(normalizedFacts);
+
   // Step 3: [Level 1] Upfront requiredFacts check
   // Path is "present" if it EXISTS in flatFacts — even if value is null.
   for (const factPath of decisionSet.requiredFacts) {
     const { found } = getPath(flatFacts, factPath);
     if (!found) {
-      return makeAbort(version, trace, {
+      return makeAbort(version, trace ?? [], {
         code: 'REQUIRED_FACT_MISSING',
         message: 'Required fact absent: ' + factPath,
         fact: factPath,
@@ -60,7 +93,7 @@ function run(compiled, entrypointId, facts, options) {
     const evalResult = evaluateWhen(compiledRule.conditions, flatFacts, missingFactPolicy);
 
     if (evalResult.abortError) {
-      return makeAbort(version, trace, evalResult.abortError);
+      return makeAbort(version, trace ?? [], evalResult.abortError);
     }
 
     if (traceEnabled) {
@@ -82,14 +115,14 @@ function run(compiled, entrypointId, facts, options) {
         patchPlan,
         metadata: deepCloneValue(compiledRule.then.metadata),
         tags: [...compiledRule.then.tags],
-        trace,
+        trace: trace ?? [],
       };
     }
   }
 
   // Step 6: No rule matched
   if (decisionSet.strict) {
-    return makeAbort(version, trace, {
+    return makeAbort(version, trace ?? [], {
       code: 'DEFAULT_REACHED_IN_STRICT_MODE',
       message: 'No rule matched and strict mode prohibits DEFAULTED',
       entrypointId,
@@ -110,7 +143,7 @@ function run(compiled, entrypointId, facts, options) {
     patchPlan: null,
     metadata: {},
     tags: [],
-    trace,
+    trace: trace ?? [],
   };
 }
 

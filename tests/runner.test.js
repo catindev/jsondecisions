@@ -375,3 +375,154 @@ test('run: nested facts are flattened transparently', () => {
   });
   assert.equal(result.status, 'MATCHED');
 });
+
+// ─── run: INVALID_FACTS_TYPE ──────────────────────────────────────────────────
+
+test('run: ABORT INVALID_FACTS_TYPE when facts is an array', () => {
+  const rule = makeRule('ds.r1', { x: 1 }, { decision: 'A', reason: 'B' });
+  const ds = makeSet('ds', ['r1']);
+  const compiled = build(rule, ds);
+
+  const result = engine.run(compiled, 'ds', [1, 2, 3]);
+  assert.equal(result.status, 'ABORT');
+  assert.equal(result.error.code, 'INVALID_FACTS_TYPE');
+});
+
+test('run: ABORT INVALID_FACTS_TYPE when facts is a string', () => {
+  const rule = makeRule('ds.r1', { x: 1 }, { decision: 'A', reason: 'B' });
+  const ds = makeSet('ds', ['r1']);
+  const compiled = build(rule, ds);
+
+  const result = engine.run(compiled, 'ds', 'some string');
+  assert.equal(result.status, 'ABORT');
+  assert.equal(result.error.code, 'INVALID_FACTS_TYPE');
+});
+
+test('run: ABORT INVALID_FACTS_TYPE when facts is a number', () => {
+  const rule = makeRule('ds.r1', { x: 1 }, { decision: 'A', reason: 'B' });
+  const ds = makeSet('ds', ['r1']);
+  const compiled = build(rule, ds);
+
+  const result = engine.run(compiled, 'ds', 42);
+  assert.equal(result.status, 'ABORT');
+  assert.equal(result.error.code, 'INVALID_FACTS_TYPE');
+});
+
+test('run: null facts treated as empty facts (not ABORT)', () => {
+  const rule = makeRule('ds.r1', { x: 'A' }, { decision: 'A', reason: 'A' });
+  const ds = makeSet('ds', ['r1']);
+  const compiled = build(rule, ds);
+
+  // null → {} → no fact x → DEFAULTED (not ABORT)
+  const result = engine.run(compiled, 'ds', null);
+  assert.equal(result.status, 'DEFAULTED');
+});
+
+test('run: undefined facts treated as empty facts (not ABORT)', () => {
+  const rule = makeRule('ds.r1', { x: 'A' }, { decision: 'A', reason: 'A' });
+  const ds = makeSet('ds', ['r1']);
+  const compiled = build(rule, ds);
+
+  const result = engine.run(compiled, 'ds', undefined);
+  assert.equal(result.status, 'DEFAULTED');
+});
+
+// ─── run: CONFLICTING_FACT_PATHS ─────────────────────────────────────────────
+
+test('run: ABORT CONFLICTING_FACT_PATHS when flat dotted key and nested object share prefix', () => {
+  const rule = makeRule('ds.r1', { 'a.b': 'X' }, { decision: 'A', reason: 'A' });
+  const ds = makeSet('ds', ['r1']);
+  const compiled = build(rule, ds);
+
+  // "a.b" and "a" both present at top level — order-dependent
+  const result = engine.run(compiled, 'ds', { 'a.b': 'X', a: { b: 'Y' } });
+  assert.equal(result.status, 'ABORT');
+  assert.equal(result.error.code, 'CONFLICTING_FACT_PATHS');
+  assert.ok(result.error.message.includes('a.b'));
+});
+
+test('run: no conflict when only nested object (no top-level dotted key)', () => {
+  const rule = makeRule('ds.r1', { 'a.b': 'X' }, { decision: 'A', reason: 'A' });
+  const ds = makeSet('ds', ['r1']);
+  const compiled = build(rule, ds);
+
+  const result = engine.run(compiled, 'ds', { a: { b: 'X' } });
+  assert.equal(result.status, 'MATCHED');
+});
+
+test('run: no conflict when only flat dotted key (no nested object)', () => {
+  const rule = makeRule('ds.r1', { 'a.b': 'X' }, { decision: 'A', reason: 'A' });
+  const ds = makeSet('ds', ['r1']);
+  const compiled = build(rule, ds);
+
+  const result = engine.run(compiled, 'ds', { 'a.b': 'X' });
+  assert.equal(result.status, 'MATCHED');
+});
+
+test('run: CONFLICTING_FACT_PATHS carries decisionSetVersion', () => {
+  const rule = makeRule('ds.r1', { 'x.y': 1 }, { decision: 'A', reason: 'B' });
+  const ds = { ...makeSet('ds', ['r1']), version: '3.0.0' };
+  const compiled = build(rule, ds);
+
+  const result = engine.run(compiled, 'ds', { 'x.y': 1, x: { y: 2 } });
+  assert.equal(result.status, 'ABORT');
+  assert.equal(result.error.code, 'CONFLICTING_FACT_PATHS');
+  assert.equal(result.decisionSetVersion, '3.0.0');
+});
+
+// ─── run: INVALID_FACTS_TYPE — non-plain objects ──────────────────────────────
+
+test('run: ABORT INVALID_FACTS_TYPE when facts is a Date', () => {
+  const rule = makeRule('ds.r1', { x: 1 }, { decision: 'A', reason: 'B' });
+  const ds = makeSet('ds', ['r1']);
+  const compiled = build(rule, ds);
+  const result = engine.run(compiled, 'ds', new Date());
+  assert.equal(result.status, 'ABORT');
+  assert.equal(result.error.code, 'INVALID_FACTS_TYPE');
+});
+
+test('run: ABORT INVALID_FACTS_TYPE when facts is a Map', () => {
+  const rule = makeRule('ds.r1', { x: 1 }, { decision: 'A', reason: 'B' });
+  const ds = makeSet('ds', ['r1']);
+  const compiled = build(rule, ds);
+  const result = engine.run(compiled, 'ds', new Map([['x', 1]]));
+  assert.equal(result.status, 'ABORT');
+  assert.equal(result.error.code, 'INVALID_FACTS_TYPE');
+});
+
+test('run: ABORT INVALID_FACTS_TYPE when facts is a RegExp', () => {
+  const rule = makeRule('ds.r1', { x: 1 }, { decision: 'A', reason: 'B' });
+  const ds = makeSet('ds', ['r1']);
+  const compiled = build(rule, ds);
+  const result = engine.run(compiled, 'ds', /pattern/);
+  assert.equal(result.status, 'ABORT');
+  assert.equal(result.error.code, 'INVALID_FACTS_TYPE');
+});
+
+test('run: ABORT INVALID_FACTS_TYPE when facts is a class instance', () => {
+  class MyFacts { constructor() { this.x = 1; } }
+  const rule = makeRule('ds.r1', { x: 1 }, { decision: 'A', reason: 'B' });
+  const ds = makeSet('ds', ['r1']);
+  const compiled = build(rule, ds);
+  const result = engine.run(compiled, 'ds', new MyFacts());
+  assert.equal(result.status, 'ABORT');
+  assert.equal(result.error.code, 'INVALID_FACTS_TYPE');
+});
+
+test('run: plain object with Object.prototype is accepted', () => {
+  const rule = makeRule('ds.r1', { x: 1 }, { decision: 'A', reason: 'B' });
+  const ds = makeSet('ds', ['r1']);
+  const compiled = build(rule, ds);
+  const result = engine.run(compiled, 'ds', { x: 1 });
+  assert.equal(result.status, 'MATCHED');
+});
+
+test('run: null-prototype object (Object.create(null)) is accepted as plain object', () => {
+  const rule = makeRule('ds.r1', { x: 1 }, { decision: 'A', reason: 'B' });
+  const ds = makeSet('ds', ['r1']);
+  const compiled = build(rule, ds);
+  const facts = Object.create(null);
+  facts.x = 1;
+  const result = engine.run(compiled, 'ds', facts);
+  assert.equal(result.status, 'MATCHED');
+});

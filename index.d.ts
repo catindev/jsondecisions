@@ -11,6 +11,23 @@ export declare class CompilationError extends Error {
   constructor(errors: CompilationErrorEntry[]);
 }
 
+/**
+ * Warnings have the same shape as CompilationErrorEntry but are never thrown.
+ * They indicate likely rule authoring mistakes found at compile time.
+ * Returned in CompiledDecisions.warnings.
+ *
+ * Warning codes:
+ *   UNREACHABLE_RULE                       — rule is subsumed by an earlier rule
+ *   PATCH_PLAN_FROM_NOT_IN_REQUIRED_FACTS  — patchPlanFrom path not in requiredFacts
+ *   UNUSED_REQUIRED_FACT                   — requiredFacts path never used in any when
+ */
+export interface CompilationWarningEntry {
+  code: string;
+  artifactId: string | null;
+  path: string | null;
+  message: string;
+}
+
 export interface TraceFailedCondition {
   fact: string;
   expected: unknown;
@@ -128,6 +145,8 @@ export interface CompiledDecisions {
   registry: ReadOnlyMapLike<string, unknown>;
   decisionSets: ReadOnlyMapLike<string, CompiledDecisionSet>;
   sources: ReadOnlyMapLike<string, SourceInfo> | null;
+  /** Compile-time warnings. Empty array if no issues detected. Never throws. */
+  warnings: readonly CompilationWarningEntry[];
 }
 
 export interface CompileOptions {

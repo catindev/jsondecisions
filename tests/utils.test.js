@@ -77,3 +77,92 @@ test('getPath: distinguishes null value from missing path', () => {
   assert.equal(getPath(withNull, 'x').found, true);   // exists with null
   assert.equal(getPath(withoutKey, 'x').found, false); // truly absent
 });
+
+// ─── detectFlatNestedConflict ─────────────────────────────────────────────────
+
+const { detectFlatNestedConflict } = require('../src/utils');
+
+test('detectFlatNestedConflict: returns conflicting key when flat+nested share prefix', () => {
+  const result = detectFlatNestedConflict({ 'a.b': 1, a: { b: 2 } });
+  assert.equal(result, 'a.b');
+});
+
+test('detectFlatNestedConflict: returns null for pure nested object', () => {
+  assert.equal(detectFlatNestedConflict({ a: { b: 1 } }), null);
+});
+
+test('detectFlatNestedConflict: returns null for pure flat object', () => {
+  assert.equal(detectFlatNestedConflict({ 'a.b': 1 }), null);
+});
+
+test('detectFlatNestedConflict: returns null for empty object', () => {
+  assert.equal(detectFlatNestedConflict({}), null);
+});
+
+test('detectFlatNestedConflict: no conflict when nested prefix key is not an object', () => {
+  // "a" exists but is a scalar, not an object — no collision
+  assert.equal(detectFlatNestedConflict({ 'a.b': 1, a: 'scalar' }), null);
+});
+
+test('detectFlatNestedConflict: no conflict when nested prefix key is an array', () => {
+  assert.equal(detectFlatNestedConflict({ 'a.b': 1, a: [1, 2] }), null);
+});
+
+test('detectFlatNestedConflict: no conflict when nested prefix key is null', () => {
+  assert.equal(detectFlatNestedConflict({ 'a.b': 1, a: null }), null);
+});
+
+test('detectFlatNestedConflict: detects conflict when dotted key is deeper than 2 segments', () => {
+  // "a.b.c" and "a" (object) → conflict on first segment "a"
+  const result = detectFlatNestedConflict({ 'a.b.c': 1, a: { b: { c: 2 } } });
+  assert.equal(result, 'a.b.c');
+});
+
+// ─── isPlainObject ────────────────────────────────────────────────────────────
+
+const { isPlainObject } = require('../src/utils');
+
+test('isPlainObject: plain object literal → true', () => {
+  assert.equal(isPlainObject({ a: 1 }), true);
+});
+
+test('isPlainObject: empty object → true', () => {
+  assert.equal(isPlainObject({}), true);
+});
+
+test('isPlainObject: Object.create(null) → true', () => {
+  assert.equal(isPlainObject(Object.create(null)), true);
+});
+
+test('isPlainObject: null → false', () => {
+  assert.equal(isPlainObject(null), false);
+});
+
+test('isPlainObject: array → false', () => {
+  assert.equal(isPlainObject([]), false);
+});
+
+test('isPlainObject: Date instance → false', () => {
+  assert.equal(isPlainObject(new Date()), false);
+});
+
+test('isPlainObject: Map instance → false', () => {
+  assert.equal(isPlainObject(new Map()), false);
+});
+
+test('isPlainObject: RegExp instance → false', () => {
+  assert.equal(isPlainObject(/x/), false);
+});
+
+test('isPlainObject: class instance → false', () => {
+  class Foo {}
+  assert.equal(isPlainObject(new Foo()), false);
+});
+
+test('isPlainObject: string → false', () => {
+  assert.equal(isPlainObject('hello'), false);
+});
+
+test('isPlainObject: number → false', () => {
+  assert.equal(isPlainObject(42), false);
+});

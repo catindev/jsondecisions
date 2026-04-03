@@ -27,8 +27,23 @@ class CompilationError extends Error {
   }
 }
 
+/**
+ * Warnings have the same shape as errors but never throw.
+ * They are returned in CompiledDecisions.warnings and indicate
+ * likely rule authoring mistakes discovered at compile time.
+ */
+function makeCompilationWarningEntry(code, artifactId, path, message) {
+  return Object.freeze({
+    code,
+    artifactId: artifactId ?? null,
+    path: path ?? null,
+    message,
+  });
+}
+
 module.exports = {
   CompilationError,
   makeCompilationErrorEntry,
   formatCompilationErrorEntry,
+  makeCompilationWarningEntry,
 };

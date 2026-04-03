@@ -3,8 +3,19 @@
 const { isPlainObject } = require('../utils');
 const { makeCompilationErrorEntry } = require('../errors');
 
-const ALLOWED_WHEN_VALUE_TYPES = new Set(['string', 'number', 'boolean']);
+// Scalar types allowed as when condition values.
+// null is also valid — checked separately via (val !== null) guard.
+const SCALAR_WHEN_VALUE_TYPES = new Set(['string', 'number', 'boolean']);
 const V2_WHEN_KEYS = new Set(['all', 'any', 'not']);
+
+/**
+ * Validate that a dot-notation path has no empty segments.
+ * Rejects: "", ".", "a.", ".b", "a..b"
+ */
+function isValidDotPath(path) {
+  if (typeof path !== 'string' || path.length === 0) return false;
+  return path.split('.').every(segment => segment.length > 0);
+}
 
 /**
  * Phase 2: validateSchema
@@ -50,7 +61,15 @@ function validateDecisionRule(a) {
       }
     }
     for (const [path, val] of Object.entries(a.when)) {
-      if (val !== null && !ALLOWED_WHEN_VALUE_TYPES.has(typeof val)) {
+      if (!isValidDotPath(path)) {
+        errors.push(makeCompilationErrorEntry(
+          'INVALID_WHEN_PATH',
+          id,
+          'when.' + path,
+          'Invalid dot-notation path: "' + path + '" (empty or has empty segment)'
+        ));
+      }
+      if (val !== null && !SCALAR_WHEN_VALUE_TYPES.has(typeof val)) {
         errors.push(makeCompilationErrorEntry(
           'INVALID_WHEN_VALUE_TYPE',
           id,
@@ -140,6 +159,8 @@ function validateDecisionSet(a) {
       a.requiredFacts.forEach((f, i) => {
         if (typeof f !== 'string' || !f) {
           errors.push(makeCompilationErrorEntry('INVALID_REQUIRED_FACT', id, 'requiredFacts[' + i + ']', '"requiredFacts[' + i + ']" must be a non-empty string'));
+        } else if (!isValidDotPath(f)) {
+          errors.push(makeCompilationErrorEntry('INVALID_REQUIRED_FACT_PATH', id, 'requiredFacts[' + i + ']', 'Invalid dot-notation path: "' + f + '" (empty or has empty segment)'));
         }
       });
     }
